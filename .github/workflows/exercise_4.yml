@@ -1,0 +1,154 @@
+name: CI with Code Quality Checks
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout calculator app code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js environment
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run unit tests with coverage
+        run: npm test -- --coverage --watchAll=false
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results
+          path: |
+            coverage/
+            junit.xml
+          retention-days: 30
+
+  code-quality:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout calculator app code
+        uses: actions/checkout@v4
+        with:
+          repository: 'PXL-2TIN-DevOps-Resources/calculator-app-finished'
+
+      - name: Setup Node.js environment
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run ESLint
+        run: |
+          npm run lint 2>&1 | tee eslint-results.txt || true
+        continue-on-error: true
+
+      - name: Run Prettier format check
+        run: |
+          npm run format:check 2>&1 | tee prettier-results.txt || true
+        continue-on-error: true
+
+      - name: Run security audit
+        run: |
+          npm audit --audit-level=high 2>&1 | tee security-audit.txt || true
+        continue-on-error: true
+
+      - name: Check if any quality checks failed
+        run: |
+          ESLINT_EXIT=0
+          PRETTIER_EXIT=0
+          AUDIT_EXIT=0
+          
+          # Check ESLint results
+          if grep -q "error" eslint-results.txt; then
+            echo "❌ ESLint found errors"
+            ESLINT_EXIT=1
+          else
+            echo "✅ ESLint passed"
+          fi
+          
+          # Check Prettier results  
+          if grep -q "differ from Prettier" prettier-results.txt; then
+            echo "❌ Prettier formatting issues found"
+            PRETTIER_EXIT=1
+          else
+            echo "✅ Prettier formatting passed"
+          fi
+          
+          # Check security audit
+          if grep -q "vulnerabilities" security-audit.txt; then
+            echo "⚠️ Security vulnerabilities found"
+            AUDIT_EXIT=1
+          else
+            echo "✅ Security audit passed"
+          fi
+          
+          # Create summary
+          echo "## Code Quality Summary" > quality-summary.md
+          echo "| Check | Status |" >> quality-summary.md
+          echo "|-------|--------|" >> quality-summary.md
+          echo "| ESLint | $([ $ESLINT_EXIT -eq 0 ] && echo "✅ Passed" || echo "❌ Failed") |" >> quality-summary.md
+          echo "| Prettier | $([ $PRETTIER_EXIT -eq 0 ] && echo "✅ Passed" || echo "❌ Failed") |" >> quality-summary.md
+          echo "| Security Audit | $([ $AUDIT_EXIT -eq 0 ] && echo "✅ Passed" || echo "⚠️ Issues Found") |" >> quality-summary.md
+          
+          cat quality-summary.md
+          
+          # Fail if any critical checks failed (excluding security audit as it's often warnings)
+          if [ $ESLINT_EXIT -ne 0 ] || [ $PRETTIER_EXIT -ne 0 ]; then
+            echo "❌ Code quality checks failed"
+            exit 1
+          fi
+
+      - name: Upload code quality results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: code-quality-results
+          path: |
+            eslint-results.txt
+            prettier-results.txt
+            security-audit.txt
+            quality-summary.md
+          retention-days: 30
+
+      - name: Comment PR with quality results
+        uses: peter-evans/create-or-update-comment@v3
+        if: github.event_name == 'pull_request' && always()
+        with:
+          issue-number: ${{ github.event.pull_request.number }}
+          body-path: quality-summary.md
+
+  # All jobs must pass for the workflow to succeed
+  all-checks:
+    runs-on: ubuntu-latest
+    needs: [test, code-quality]
+    if: always()
+    
+    steps:
+      - name: Check all jobs status
+        run: |
+          if [ "${{ needs.test.result }}" != "success" ] || [ "${{ needs.code-quality.result }}" != "success" ]; then
+            echo "❌ One or more jobs failed"
+            exit 1
+          else
+            echo "✅ All checks passed successfully!"
+          fi
